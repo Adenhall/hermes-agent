@@ -1,4 +1,4 @@
-"""Dashboard manifest declarations must survive real discovery and authenticated HTTP.
+"""Dashboard declarations must survive real discovery and token-bearing HTTP requests.
 
 Backend metadata slice only: these tests do not execute JS or enforce SDK admission.
 """
@@ -14,8 +14,8 @@ JS = b"window.syntheticPlugin = true;\n"
 CSS = b".synthetic { color: red; }\n"
 
 
-def sri(content):
-    return "sha384-" + base64.b64encode(hashlib.sha384(content).digest()).decode("ascii")
+def sri(content, algorithm="sha384"):
+    return algorithm + "-" + base64.b64encode(hashlib.new(algorithm, content).digest()).decode("ascii")
 
 
 @pytest.fixture
@@ -67,6 +67,16 @@ def plugin_host(tmp_path, monkeypatch):
 @pytest.mark.parametrize("declarations", [
     {},
     {"integrity": sri(JS)},
+    {"integrity": sri(JS, "sha256")},
+    {"integrity": sri(JS, "sha512")},
+    {"integrity": sri(JS) + " " + sri(JS)},
+    {"integrity": " \t" + sri(JS) + "\n"},
+    {"integrity": sri(JS, "sha256") + "\t\r\n\f " + sri(JS) + " " + sri(JS, "sha512")},
+    *[{"integrity": sri(JS, algorithm).rstrip("=")} for algorithm in ("sha256", "sha512")],
+    {"integrity": sri(JS).replace("sha384-", "SHA384-")},
+    {"integrity": "sha384-" + base64.urlsafe_b64encode(hashlib.sha384(JS).digest()).decode("ascii")},
+    {"integrity": sri(JS) + "?reserved-option?another=value"},
+    {"integrity": sri(JS) + "?"},
     {"css_integrity": sri(CSS)},
     {"sdk": {"min": "1.1", "max": "1.x"}},
     {"sdk": {"min": "1.1.0", "max": "1.9.2"}, "integrity": sri(JS), "css_integrity": sri(CSS)},
@@ -122,8 +132,22 @@ def test_declared_metadata_roundtrips_without_weakening_guards(plugin_host, decl
     *[(field, value) for field in ("integrity", "css_integrity") for value in (
         None, False, 384, [], {}, "", "sha256-" + "A" * 64,
         "sha384-" + "A" * 63, "sha384-" + "A" * 65,
-        "sha384-" + "_" * 64, sri(JS) + "=", " " + sri(JS),
-        sri(JS) + "\n", sri(JS) + " " + sri(CSS),
+        "sha384-" + "!" * 64, sri(JS) + "=",
+    )],
+    # Whitespace and lists are valid JS SRI, not invalid declarations (R1).
+    # CSS retains its separate, single standard-base64 SHA384 policy.
+    *[("css_integrity", value) for value in (
+        "sha384-" + "_" * 64, " " + sri(JS), sri(JS) + "\n",
+        sri(JS) + " " + sri(CSS), sri(CSS, "sha256"), sri(CSS, "sha512"),
+    )],
+    *[("integrity", value) for value in (
+        " \t\r\n\f", "sha1-" + "A" * 28,
+        "sha256-" + "A" * 42 + "=", "sha256-" + "A" * 44 + "=",
+        "sha512-" + "A" * 85 + "==", "sha512-" + "A" * 87 + "==",
+        sri(JS, "sha256") + "=", sri(JS, "sha512")[:-1],
+        sri(JS) + " sha384-bad", "sha384-bad " + sri(JS),
+        sri(JS) + "," + sri(JS), sri(JS) + "\v" + sri(JS),
+        sri(JS) + "\u00a0" + sri(JS), sri(JS) + "?\x00", sri(JS) + "?\u00e9",
     )],
     *[("sdk", value) for value in (
         None, False, 1, "1.1", [], {}, {"min": "1.1"}, {"max": "1.x"},

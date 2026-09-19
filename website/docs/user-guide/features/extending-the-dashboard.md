@@ -483,8 +483,8 @@ None of them are required; include only the layers you need.
 | `entry` | Yes | Path to the JS bundle relative to `dashboard/`. Defaults to `dist/index.js`. |
 | `css` | No | Path to a CSS file to inject as a `<link>` tag. |
 | `api` | No | Path to a Python file with FastAPI routes. Mounted at `/api/plugins/<name>/`. |
-| `integrity` | No | A single `sha384-` JS digest followed by exactly 64 standard base64 characters (no padding, whitespace or digest list). Preserved unchanged for the existing script SRI consumer. |
-| `css_integrity` | No | A CSS digest in the same SHA-384 format. Validated and retained as metadata; the current loader does not enforce CSS SRI. |
+| `integrity` | No | JS SRI using SHA-256, SHA-384 or SHA-512, including whitespace-delimited digest lists (grammar below). Preserved literally unchanged for the existing script SRI consumer. |
+| `css_integrity` | No | A single `sha384-` CSS digest followed by exactly 64 standard base64 characters (no padding, whitespace or digest list). Validated and retained as metadata; the current loader does not enforce CSS SRI. |
 | `sdk` | No | An object containing exactly `min` and `max` strings, using the range grammar below. Validated and retained as metadata, not runtime SDK admission. |
 
 #### Declared integrity and SDK metadata
@@ -494,6 +494,20 @@ manifest. A supplied invalid declaration (including `null`, an empty string or t
 JSON type) rejects the entire dashboard manifest; the server logs its manifest path,
 offending field and expected format. An absent declaration remains absent so legacy
 plugins continue to work. Unknown top-level metadata is not forwarded.
+
+JS `integrity` accepts one or more `sha256-`, `sha384-` or `sha512-` tokens
+(ASCII case-insensitive algorithm names). Digests use the
+[SRI/CSP base64 alphabet](https://www.w3.org/TR/CSP3/#grammardef-base64-value),
+including URL-safe `-` and `_`, with algorithm-specific lengths: 43 characters
+and an optional `=` for SHA-256, 64 without padding for SHA-384, or 86 and
+optional `==` for SHA-512. Tokens may have the
+[SRI reserved `?` options](https://www.w3.org/TR/SRI/#the-integrity-attribute)
+(visible ASCII only; no option semantics are implemented). ASCII space, tab,
+LF, FF and CR may separate tokens or surround the list. The entire declaration,
+including whitespace, case, padding and options, is retained without normalization.
+This host policy rejects empty/whitespace-only declarations, unknown algorithms,
+bad digest lengths/padding and any malformed list member rather than silently
+discarding invalid tokens. CSS retains the separate narrower grammar above.
 
 `sdk.min` accepts `M.m` or `M.m.p`; `sdk.max` accepts either form or `M.x`.
 Components are non-negative decimal integers without leading zeros, prerelease/build

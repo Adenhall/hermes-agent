@@ -505,14 +505,32 @@ def _dashboard_plugin_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
     Absence is legacy-compatible; an explicitly invalid declaration is not absence.
     """
     metadata: Dict[str, Any] = {}
-    for field in ("integrity", "css_integrity"):
-        if field not in data:
-            continue
-        value = data[field]
+    if "integrity" in data:
+        value = data["integrity"]
+        # SRI hash-with-options uses CSP's base64 alphabet. Enforce digest
+        # lengths and correct optional padding, rather than ignoring bad tokens
+        # as a browser may. Validate the whole list without rewriting its value.
+        alphabet = r"[A-Za-z0-9+/_-]"
+        digest = rf"(?:sha256-{alphabet}{{43}}=?|sha384-{alphabet}{{64}}|sha512-{alphabet}{{86}}(?:==)?)"
+        token = rf"{digest}(?:\?[\x21-\x7e]*)?"
+        whitespace = r"[ \t\n\f\r]"
+        if not isinstance(value, str) or not re.fullmatch(
+            rf"{whitespace}*{token}(?:{whitespace}+{token})*{whitespace}*",
+            value, flags=re.ASCII | re.IGNORECASE,
+        ):
+            raise ValueError(
+                "integrity must contain whitespace-separated sha256/sha384/sha512 "
+                "digests with the correct base64 length and padding"
+            )
+        metadata["integrity"] = value
+
+    if "css_integrity" in data:
+        value = data["css_integrity"]
+        # CSS retains its separate single-token policy; do not widen it with JS.
         # SHA-384 is 48 bytes: exactly 64 standard base64 characters, no padding.
         if not isinstance(value, str) or not re.fullmatch(r"sha384-[A-Za-z0-9+/]{64}", value):
-            raise ValueError(f"{field} must be a single sha384- digest with 64 base64 characters")
-        metadata[field] = value
+            raise ValueError("css_integrity must be a single sha384- digest with 64 base64 characters")
+        metadata["css_integrity"] = value
 
     if "sdk" in data:
         sdk = data["sdk"]
