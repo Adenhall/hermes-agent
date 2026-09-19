@@ -495,8 +495,13 @@ JSON type) rejects the entire dashboard manifest; the server logs its manifest p
 offending field and expected format. An absent declaration remains absent so legacy
 plugins continue to work. Unknown top-level metadata is not forwarded.
 
-JS `integrity` accepts one or more `sha256-`, `sha384-` or `sha512-` tokens
-(ASCII case-insensitive algorithm names). Digests use the
+JS `integrity` accepts one or more lowercase `sha256-`, `sha384-` or `sha512-`
+tokens. Although the SRI specification permits case-insensitive algorithm names,
+the host requires these browser-effective lowercase spellings: the
+[inspected Chromium parser](https://github.com/chromium/chromium/blob/13b52743e6214d40a7eddf7d099616116f4c7954/third_party/blink/renderer/platform/loader/subresource_integrity.cc)
+ignores uppercase/mixed-case algorithms, potentially leaving no effective hash
+or silently dropping the strongest assertion in a list. This restriction is based
+on source inspection, not browser execution. Digests use the
 [SRI/CSP base64 alphabet](https://www.w3.org/TR/CSP3/#grammardef-base64-value),
 including URL-safe `-` and `_`, with algorithm-specific lengths: 43 characters
 and an optional `=` for SHA-256, 64 without padding for SHA-384, or 86 and
@@ -506,8 +511,9 @@ optional `==` for SHA-512. Tokens may have the
 LF, FF and CR may separate tokens or surround the list. The entire declaration,
 including whitespace, case, padding and options, is retained without normalization.
 This host policy rejects empty/whitespace-only declarations, unknown algorithms,
-bad digest lengths/padding and any malformed list member rather than silently
-discarding invalid tokens. CSS retains the separate narrower grammar above.
+unsupported algorithm casing, bad digest lengths/padding and any malformed list
+member rather than silently discarding tokens or repairing casing. One unsupported
+member rejects the entire declaration. CSS retains the separate narrower grammar above.
 
 `sdk.min` accepts `M.m` or `M.m.p`; `sdk.max` accepts either form or `M.x`.
 Components are non-negative decimal integers without leading zeros, prerelease/build

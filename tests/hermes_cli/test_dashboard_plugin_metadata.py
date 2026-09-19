@@ -73,7 +73,6 @@ def plugin_host(tmp_path, monkeypatch):
     {"integrity": " \t" + sri(JS) + "\n"},
     {"integrity": sri(JS, "sha256") + "\t\r\n\f " + sri(JS) + " " + sri(JS, "sha512")},
     *[{"integrity": sri(JS, algorithm).rstrip("=")} for algorithm in ("sha256", "sha512")],
-    {"integrity": sri(JS).replace("sha384-", "SHA384-")},
     {"integrity": "sha384-" + base64.urlsafe_b64encode(hashlib.sha384(JS).digest()).decode("ascii")},
     {"integrity": sri(JS) + "?reserved-option?another=value"},
     {"integrity": sri(JS) + "?"},
@@ -129,6 +128,20 @@ def test_declared_metadata_roundtrips_without_weakening_guards(plugin_host, decl
 
 
 @pytest.mark.parametrize("field,value", [
+    # Replace the old uppercase-positive policy: the SRI spec permits case
+    # variants, but Chromium ignores them, potentially leaving no effective hash.
+    # Reject the whole list; do not repair casing or drop its strongest member.
+    *[pytest.param("integrity", sri(JS, algorithm).replace(algorithm, algorithm.upper()),
+                   id=f"uppercase-{algorithm}") for algorithm in ("sha256", "sha384", "sha512")],
+    *[pytest.param("integrity", sri(JS, algorithm).replace(algorithm, algorithm.capitalize()),
+                   id=f"mixed-case-{algorithm}") for algorithm in ("sha256", "sha384", "sha512")],
+    pytest.param("integrity", sri(b"different bytes").replace("sha384-", "SHA384-"),
+                 id="uppercase-mismatched-ignored-by-chromium"),
+    pytest.param("integrity", sri(JS, "sha256") + " "
+                 + sri(b"different bytes", "sha512").replace("sha512-", "SHA512-"),
+                 id="uppercase-stronger-token-dropped"),
+    pytest.param("integrity", sri(JS, "sha512").replace("sha512-", "SHA512-")
+                 + " " + sri(JS, "sha256"), id="uppercase-first-in-mixed-list"),
     *[(field, value) for field in ("integrity", "css_integrity") for value in (
         None, False, 384, [], {}, "", "sha256-" + "A" * 64,
         "sha384-" + "A" * 63, "sha384-" + "A" * 65,
