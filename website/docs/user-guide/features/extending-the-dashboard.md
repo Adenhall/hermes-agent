@@ -483,6 +483,29 @@ None of them are required; include only the layers you need.
 | `entry` | Yes | Path to the JS bundle relative to `dashboard/`. Defaults to `dist/index.js`. |
 | `css` | No | Path to a CSS file to inject as a `<link>` tag. |
 | `api` | No | Path to a Python file with FastAPI routes. Mounted at `/api/plugins/<name>/`. |
+| `integrity` | No | A single `sha384-` JS digest followed by exactly 64 standard base64 characters (no padding, whitespace or digest list). Preserved unchanged for the existing script SRI consumer. |
+| `css_integrity` | No | A CSS digest in the same SHA-384 format. Validated and retained as metadata; the current loader does not enforce CSS SRI. |
+| `sdk` | No | An object containing exactly `min` and `max` strings, using the range grammar below. Validated and retained as metadata, not runtime SDK admission. |
+
+#### Declared integrity and SDK metadata
+
+Optional declarations are validated during discovery, before caching or returning the
+manifest. A supplied invalid declaration (including `null`, an empty string or the wrong
+JSON type) rejects the entire dashboard manifest; the server logs its manifest path,
+offending field and expected format. An absent declaration remains absent so legacy
+plugins continue to work. Unknown top-level metadata is not forwarded.
+
+`sdk.min` accepts `M.m` or `M.m.p`; `sdk.max` accepts either form or `M.x`.
+Components are non-negative decimal integers without leading zeros, prerelease/build
+suffixes or whitespace. A missing patch means zero; numeric bounds are inclusive.
+`M.x` covers that major's minor/patch versions. The minimum must not exceed the maximum.
+For example, `"sdk": {"min": "1.1", "max": "1.x"}` declares SDK 1.1.0 or later
+within major 1. Both keys are required when `sdk` is supplied; no other keys are accepted.
+
+This is a **backend metadata contract**, not complete plugin admission. Discovery does
+not compare the range with the running SDK or hash served files. The existing JS loader
+can consume `integrity`, but SDK admission, CSS SRI and cached-manifest execution policy
+require separate loader support. Declarations are not signatures or a plugin sandbox.
 
 #### Available icons
 
