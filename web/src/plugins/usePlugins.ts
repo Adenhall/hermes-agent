@@ -62,7 +62,11 @@ export function usePlugins() {
       });
       setCurrentManifests(admitted);
       if (admitted.length === 0) setLoading(false);
-    }).catch(() => { if (active) setLoading(false); });
+    }).catch(() => {
+      if (!active) return;
+      setManifests([]);
+      setLoading(false);
+    });
     return () => { active = false; };
   }, []);
 
