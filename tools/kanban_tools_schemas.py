@@ -479,8 +479,25 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "completion_contract": _prop("string", (
             "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
-            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr."
+            "PR tasks cannot complete until exact-head CI passes. On publication pass metadata.published_pr."
         )),
+        "completion_checks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "context": _prop("string", "Exact required check-run name or legacy status context."),
+                    "app_id": _prop("integer", "Optional positive GitHub App database id binding."),
+                },
+                "required": ["context"],
+                "additionalProperties": False,
+            },
+            "description": (
+                "Opt into an owner-declared persisted named-check policy. Omit to retain repository-policy discovery. "
+                "Every named exact-head check must succeed; observed green checks never become requirements implicitly."
+            ),
+        },
         "goal_max_turns": _prop("integer", (
                 "Turn budget for goal_mode workers. Caps how many "
                 "continuation turns the worker may take before the task "

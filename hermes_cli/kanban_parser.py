@@ -189,6 +189,8 @@ _SPECS = [
                   "the worker). Requires --model."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
+        _arg("--completion-check", action="append", dest="completion_checks", metavar="CONTEXT[@APP_ID]",
+             help="Opt into owner-declared named-check policy (repeatable). Omit to use repository policy."),
         _arg("--goal", action="store_true", dest="goal_mode",
              help="Run the worker in a goal loop: after each turn a judge checks the "
                   "response against the card title/body and, if not done, the worker "

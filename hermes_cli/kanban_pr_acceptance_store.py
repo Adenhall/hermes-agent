@@ -1,12 +1,17 @@
 """Persist acceptance with the same ownership snapshot as the terminal write."""
 from __future__ import annotations
 
+import json
+
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_pr_acceptance import _PR, collect_acceptance
 
 
 def _snapshot(conn, task_id):
-    row = conn.execute("SELECT current_run_id, status, completion_contract FROM tasks WHERE id=?", (task_id,)).fetchone()
+    row = conn.execute(
+        "SELECT current_run_id, status, completion_contract, completion_checks FROM tasks WHERE id=?",
+        (task_id,),
+    ).fetchone()
     return tuple(row) if row else None
 
 
@@ -14,7 +19,7 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     snapshot = _snapshot(conn, task_id)
     if snapshot is None:
         return False
-    run_id, status, contract = snapshot
+    run_id, status, contract, checks_json = snapshot
     if not contract or contract == "local-only":
         return None
     if status not in {"running", "ready", "blocked", "review"} or (expected_run_id is not None and run_id != expected_run_id):
@@ -27,9 +32,13 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
             if _snapshot(conn, task_id) != snapshot:
                 return False
             conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
-        snapshot = (run_id, status, published_pr)
+        snapshot = (run_id, status, published_pr, checks_json)
         contract = published_pr
-    return snapshot, collect_acceptance(contract, published_pr)
+    try:
+        completion_checks = json.loads(checks_json) if checks_json is not None else None
+    except (TypeError, ValueError):
+        completion_checks = checks_json  # explicit but corrupt: validation fails closed in the receipt
+    return snapshot, collect_acceptance(contract, published_pr, completion_checks)
 
 
 def record_acceptance(conn, task_id, acceptance):

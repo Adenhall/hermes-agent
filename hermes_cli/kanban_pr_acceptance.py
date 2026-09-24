@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from typing import Any
 from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -20,6 +21,43 @@ def validate_contract(value: str | None) -> str:
     if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value)):
         raise ValueError("completion_contract must be local-only, OWNER/REPO, or an exact GitHub PR URL")
     return value
+
+
+def validate_completion_checks(value: Any, contract: str) -> list[dict[str, Any]] | None:
+    """Canonical owner-declared check contexts; ``None`` keeps repository policy mode."""
+    if value is None:
+        return None
+    if contract == "local-only":
+        raise ValueError("completion_checks require a PR completion_contract")
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("completion_checks must be a non-empty list")
+    checks: list[dict[str, Any]] = []
+    seen: set[tuple[str, int | None]] = set()
+    for raw in value:
+        app_id = None
+        if isinstance(raw, str):
+            context = raw.strip()
+            name, separator, suffix = context.rpartition("@")
+            if separator and suffix.isdecimal():
+                context, app_id = name.strip(), int(suffix)
+        elif isinstance(raw, dict):
+            if set(raw) - {"context", "app_id"}:
+                raise ValueError("completion_checks entries only accept context and app_id")
+            context = raw.get("context")
+            app_id = raw.get("app_id")
+        else:
+            raise ValueError("completion_checks entries must be context strings or objects")
+        if not isinstance(context, str) or not context.strip():
+            raise ValueError("completion_checks contexts must be non-empty strings")
+        context = context.strip()
+        if app_id is not None and (isinstance(app_id, bool) or not isinstance(app_id, int) or app_id <= 0):
+            raise ValueError("completion_checks app_id must be a positive integer")
+        key = (context, app_id)
+        if key in seen:
+            raise ValueError("completion_checks must not contain duplicates")
+        seen.add(key)
+        checks.append({"context": context, "app_id": app_id})
+    return checks
 
 
 def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
@@ -36,9 +74,13 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
     return value
 
 
-def collect_acceptance(contract: str, published_pr: str | None) -> dict:
+def collect_acceptance(
+    contract: str, published_pr: str | None, completion_checks: Any = None,
+) -> dict:
+    policy_source = "explicit" if completion_checks is not None else "repository"
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
-               "pr_url": published_pr, "checks": [],
+               "pr_url": published_pr, "policy_source": policy_source,
+               "phase": "binding", "required": [], "checks": [],
                "recovery": "Fix required failures, rerun infrastructure checks or wait, then retry completion. "
                            "Use kanban_block if human input is needed; receipts remain on the task event log."}
     try:
@@ -51,61 +93,86 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
-            baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
-                json.dumps(owner), json.dumps(name), number)
+        if completion_checks is not None:
+            receipt["phase"] = "explicit_policy"
+        named_checks = validate_completion_checks(completion_checks, contract)
+        receipt["phase"] = "pull_request"
+        if named_checks is None:
+            query = """{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
+                baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}""" % (
+                    json.dumps(owner), json.dumps(name), number)
+        else:
+            query = """{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state}}}""" % (
+                    json.dumps(owner), json.dumps(name), number)
         pr = _api("graphql", query=query)["data"]["repository"]["pullRequest"]
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
-        protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True)
-        for page in rules:
-            for rule in page:
-                if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
-        receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
+        if named_checks is None:
+            receipt["phase"] = "repository_policy"
+            protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
+            required = {(r["context"], (r.get("app") or {}).get("databaseId"))
+                        for r in protection.get("requiredStatusChecks", [])}
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True)
+            for page in rules:
+                for rule in page:
+                    if rule["type"] == "required_status_checks":
+                        required.update((r["context"], r.get("integration_id"))
+                                        for r in rule["parameters"]["required_status_checks"])
+        else:
+            required = {(item["context"], item["app_id"]) for item in named_checks}
+        ordered_required = sorted(required, key=lambda item: (item[0], item[1] or -1))
+        receipt["required"] = [{"context": context, "app_id": app_id}
+                               for context, app_id in ordered_required]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
+        receipt["phase"] = "check_runs"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest", paginate=True)
         runs = [run for page in pages for run in page["check_runs"]]
         if len({r["id"] for r in runs}) != pages[0]["total_count"]:
             raise ValueError("Incomplete check-run pagination")
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100", paginate=True) for s in page]
+        receipt["phase"] = "statuses"
+        statuses = [{**s, "sha": sha} for page in _api(
+            f"repos/{repo}/commits/{sha}/statuses?per_page=100", paginate=True) for s in page]
         outcomes = []
-        for context, app_id in sorted(required, key=str):
+        for context, app_id in ordered_required:
             matching = [r for r in runs if r["name"] == context and
-                        (app_id in (None, -1) or r["app"]["id"] == app_id)]
+                        (app_id in (None, -1) or (r.get("app") or {}).get("id") == app_id)]
             # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
             legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
             selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
             if not selected:
                 outcomes.append("missing")
-                receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
+                receipt["checks"].append({"name": context, "app_id": app_id,
+                                          "classification": "missing", "head_sha": sha})
             for check in selected:
                 is_run = "conclusion" in check
                 outcome = check.get("conclusion") if is_run else check["state"]
                 classification = _classify(check, sha, outcome, is_run)
                 outcomes.append(classification)
                 receipt["checks"].append({"name": context, "id": check["id"],
+                    "app_id": (check.get("app") or {}).get("id") if is_run else None,
                     "url": check.get("html_url") or check.get("target_url"),
                     "head_sha": check.get("head_sha", check.get("sha")),
                     "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
+        receipt["phase"] = "pull_request_reread"
         current = _api(f"repos/{repo}/pulls/{number}")
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
+        receipt["phase"] = "decision"
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
         return receipt
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
-        receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
+        phase = receipt["phase"]
+        receipt.update(classification="infra",
+                       detail=f"GitHub acceptance evidence unavailable or incomplete during {phase}; "
+                              "check the persisted policy, gh authentication/API access, and retry.")
         return receipt
 
 
