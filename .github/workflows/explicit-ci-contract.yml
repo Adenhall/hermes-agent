@@ -1,9 +1,9 @@
 name: Explicit CI contract (supplemental)
 
 on:
-  push:
-    branches:
-      - feat/kanban-explicit-ci-contract
+  # One pull_request trigger makes this required check available to every PR
+  # into the fork without producing a duplicate same-name push check.
+  pull_request:
 
 permissions:
   contents: read
@@ -18,8 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout exact pushed revision
+      - name: Checkout exact PR head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
