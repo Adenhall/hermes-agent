@@ -52,6 +52,28 @@ Declare PR work at creation with `--completion-contract OWNER/REPO` (or an exact
 accepts the same `completion_contract`. Use `local-only` for intentionally local
 work; existing and undeclared cards retain that default. Prose URLs are not policy.
 
+Repository policy remains the default source of required checks. When an owner cannot
+read branch-rule policy (for example, because GitHub restricts that API for the
+repository plan) but can name the intended CI contract, opt in at card creation:
+
+```bash
+hermes kanban create "Publish change" --assignee engineer \
+  --completion-contract OWNER/REPO \
+  --completion-check "unit-tests" \
+  --completion-check "lint@15368"
+```
+
+The optional numeric suffix pins a context to a GitHub App database id. The equivalent
+`kanban_create` input is `completion_checks: [{context: "unit-tests"}, {context:
+"lint", app_id: 15368}]`. The non-empty list is persisted with the card and selects
+**explicit** policy mode; omission selects **repository** policy mode. Explicit mode
+skips only classic-protection/ruleset discovery. It still requires the bound PR, a
+current 40-character head SHA, complete check/status pagination, exact name/app
+matches, and the final head/base re-read. It never promotes whichever checks happen
+to be green into policy. Empty, malformed, missing, pending, failed, cancelled,
+timed-out, stale, skipped or neutral evidence fails closed, as do authentication,
+API, parse and pagination errors.
+
 After publishing, pass `metadata.published_pr` to completion. The first matching
 URL binds the card permanently; retries cannot substitute a green sibling PR.
 CLI `show --json` and `kanban_show` expose the persisted contract.
@@ -62,13 +84,15 @@ required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
 neutral **required** evidence cannot complete the card. Neither can zero-run
-acceptance, unreadable policy or GitHub API failures. A repository without required
-checks needs a local-only contract. `gh` must be authenticated with read access to
-the repository's checks and rules; no remote writes are performed by this gate.
+acceptance, unreadable policy or GitHub API failures. In repository mode, a repository
+without required checks needs a local-only or deliberately declared explicit policy.
+`gh` must be authenticated with read access to the repository's checks, and to its
+rules in repository mode; no remote writes are performed by this gate.
 
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
-store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
-instructions; `last_failure_error` surfaces the next step. Fix failures, rerun
+store PR URL, SHA, policy source, collection phase, required contexts/app ids,
+check IDs/URLs, classifications and recovery instructions; `last_failure_error`
+surfaces the next step. Fix failures, rerun
 infrastructure checks or wait, then retry completion. Use `kanban_block` when
 human action is needed. Generic GitHub `failure` cannot establish whether a test
 or artifact upload failed; inspect its retained URL. Explicit infrastructure

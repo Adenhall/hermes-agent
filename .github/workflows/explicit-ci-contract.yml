@@ -1,0 +1,55 @@
+name: Explicit CI contract (supplemental)
+
+on:
+  # One pull_request trigger makes this required check available to every PR
+  # into the fork without producing a duplicate same-name push check.
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: explicit-ci-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verification:
+    name: Explicit CI contract (affected tests + lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install locked test dependencies
+        run: uv sync --locked --python 3.11 --extra dev --extra messaging
+
+      - name: Run affected tests
+        timeout-minutes: 8
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh \
+            tests/hermes_cli/test_kanban_pr_acceptance.py \
+            tests/hermes_cli/test_kanban_core_functionality.py \
+            tests/hermes_cli/test_kanban_db.py \
+            tests/hermes_cli/test_kanban_cli.py \
+            tests/tools/test_kanban_tools.py \
+            tests/gateway/test_kanban_wake_acceptance.py -q
+
+      - name: Run blocking lint
+        timeout-minutes: 3
+        run: uv run ruff check .
