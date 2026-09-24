@@ -34,7 +34,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install locked test dependencies
-        run: uv sync --locked --python 3.11 --extra dev
+        run: uv sync --locked --python 3.11 --extra dev --extra messaging
 
       - name: Run affected tests
         timeout-minutes: 8
