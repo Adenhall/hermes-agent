@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -17,13 +18,52 @@ def github(tmp_path, monkeypatch):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            state["requests"].append(self.path)
+            request = urlparse(self.path)
+            state["requests"].append(request.path)
             sha = state["head"]
-            if self.path == "/graphql":
-                value = {"data": {"repository": {"pullRequest": {
-                    "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
-                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+            if request.path == "/graphql":
+                graphql = parse_qs(request.query).get("query", [""])[0]
+                is_rollup = "node(id:" in graphql
+                status = "IN_PROGRESS" if state["conclusion"] == "pending" else "COMPLETED"
+                required = {"__typename": "CheckRun", "databaseId": 42,
+                    "name": "required", "status": status,
+                    "conclusion": state["conclusion"].upper() if state["conclusion"] else None,
+                    "detailsUrl": "https://github.com/acme/repo/actions/runs/42",
+                    "isRequired": True, "checkSuite": {"headSha": "b" * 40 if state.get("stale") else sha,
+                        "app": {"databaseId": 1}}}
+                if state.get("api_denied") and is_rollup:
+                    self.send_error(403)
+                    return
+                if state.get("malformed_required"):
+                    required = {"__typename": "StatusContext", "id": None,
+                                "context": "required", "isRequired": True}
+                if state.get("paginate_required") and is_rollup:
+                    if 'after:"next"' not in graphql:
+                        nodes = [{**required, "databaseId": 1000 + i, "name": f"optional-{i}",
+                                  "isRequired": False} for i in range(100)]
+                        page_info = {"hasNextPage": True, "endCursor": "next"}
+                    else:
+                        nodes = [required]
+                        page_info = {"hasNextPage": False, "endCursor": None}
+                    total_count = 101
+                    state["reads"] += 1
+                else:
+                    nodes = [] if state.get("missing") else [required]
+                    page_info = {"hasNextPage": False, "endCursor": None}
+                    total_count = len(nodes)
+                branch_required = [] if state.get("pr_specific") else [
+                    {"context": "required", "app": {"databaseId": 1}}]
+                contexts = {"nodes": nodes, "pageInfo": page_info,
+                            "totalCount": total_count}
+                commit = {"oid": sha, "statusCheckRollup": {"contexts": contexts}}
+                pull_request = {
+                    "id": "PR_test", "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
+                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": branch_required}},
+                    "commits": {"nodes": [{"commit": commit}]}}
+                value = {"data": {"repository": {"pullRequest": pull_request},
+                                  "node": pull_request}}
+                if state.get("head_change"):
+                    state["head"] = "b" * 40
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -60,8 +100,10 @@ def github(tmp_path, monkeypatch):
     shim = tmp_path / "bin"
     shim.mkdir()
     gh = shim / "gh"
-    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.request\n"
+    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.parse,urllib.request\n"
+                  "q=next((a[6:] for a in sys.argv if a.startswith('query=')),'')\n"
                   f"u='http://127.0.0.1:{server.server_port}/'+sys.argv[2]\n"
+                  "u += ('?'+urllib.parse.urlencode({'query':q})) if q else ''\n"
                   "print(urllib.request.urlopen(u).read().decode())\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
@@ -107,6 +149,49 @@ def test_pr_completion_requires_current_required_evidence(github):
         local = kb.create_task(conn, title="local", completion_contract="local-only")
         assert kb.complete_task(conn, local, summary="https://github.com/acme/repo/pull/7 is background context")
         assert len(github["requests"]) == before
+
+
+@pytest.mark.linux_only
+def test_pr_specific_required_check_is_discovered_after_empty_policy_results(github):
+    github.update(pr_specific=True, paginate_required=True, reads=0, conclusion="success")
+    with connect() as conn:
+        tid = kb.create_task(conn, title="PR-specific requiredness", completion_contract="acme/repo")
+
+        assert kb.complete_task(
+            conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'",
+            (tid,)).fetchone()[0])
+        assert receipt["ok"] is True
+        assert receipt["required"] == [{"context": "required", "app_id": 1}]
+        assert receipt["checks"] == [{
+            "name": "required", "id": 42,
+            "url": "https://github.com/acme/repo/actions/runs/42",
+            "head_sha": "a" * 40, "classification": "success",
+            "conclusion": "success"}]
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize(("fault", "classification"), [
+    ("malformed_required", "infra"),
+    ("api_denied", "infra"),
+    ("missing", "missing"),
+])
+def test_pr_requiredness_signal_fails_closed(github, fault, classification):
+    github.update(pr_specific=True, conclusion="success", **{fault: True})
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Fail closed", completion_contract="acme/repo")
+
+        assert not kb.complete_task(
+            conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'",
+            (tid,)).fetchone()[0])
+        assert receipt["ok"] is False
+        assert receipt["classification"] == classification
+        assert kb.get_task(conn, tid).status != "done"
 
 
 @pytest.mark.linux_only

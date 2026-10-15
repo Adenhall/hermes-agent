@@ -36,6 +36,96 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
     return value
 
 
+def _pr_required_checks(pr_id: str, sha: str, branch: str, state: str) -> set[tuple[str, int | None]]:
+    """Read GitHub's PR-specific requiredness signal with complete pagination."""
+    required: set[tuple[str, int | None]] = set()
+    seen_nodes = set()
+    seen_cursors = set()
+    expected_total = None
+    after = None
+    while True:
+        after_clause = "" if after is None else ",after:" + json.dumps(after)
+        query = '''{node(id:%s){...on PullRequest{
+            id headRefOid baseRefName state
+            commits(last:1){nodes{commit{
+                oid
+                statusCheckRollup{contexts(first:100%s){
+                    totalCount
+                    pageInfo{hasNextPage endCursor}
+                    nodes{
+                        __typename
+                        ...on StatusContext{
+                            id context isRequired(pullRequestId:%s)
+                        }
+                        ...on CheckRun{
+                            databaseId name isRequired(pullRequestId:%s)
+                            checkSuite{app{databaseId}}
+                        }
+                    }
+                }}
+            }}}
+        }}}''' % (json.dumps(pr_id), after_clause, json.dumps(pr_id), json.dumps(pr_id))
+        current = _api("graphql", query=query)["data"]["node"]
+        if (current["id"], current["headRefOid"], current["baseRefName"], current["state"]) != (
+                pr_id, sha, branch, state):
+            raise ValueError("PR changed while collecting required checks")
+        commits = current["commits"]["nodes"]
+        if len(commits) != 1 or commits[0]["commit"]["oid"] != sha:
+            raise ValueError("PR status rollup is not bound to the captured head")
+        rollup = commits[0]["commit"].get("statusCheckRollup")
+        if rollup is None:
+            if after is not None:
+                raise ValueError("Incomplete status-check pagination")
+            return set()
+        contexts = rollup["contexts"]
+        total = contexts["totalCount"]
+        if type(total) is not int or total < 0 or (expected_total is not None and total != expected_total):
+            raise ValueError("Invalid status-check total")
+        expected_total = total
+        for node in contexts["nodes"]:
+            kind = node["__typename"]
+            is_required = node["isRequired"]
+            if not isinstance(is_required, bool):
+                raise TypeError("Invalid requiredness signal")
+            if kind == "CheckRun":
+                check_id = node["databaseId"]
+                if type(check_id) is not int:
+                    raise TypeError("Invalid check-run identity")
+                identity = (kind, check_id)
+                context = node["name"]
+                app = ((node.get("checkSuite") or {}).get("app") or {})
+                app_id = app.get("databaseId")
+                if app_id is not None and type(app_id) is not int:
+                    raise TypeError("Invalid check-run application identity")
+            elif kind == "StatusContext":
+                status_id = node["id"]
+                if not isinstance(status_id, str) or not status_id:
+                    raise TypeError("Invalid status-context identity")
+                identity = (kind, status_id)
+                context, app_id = node["context"], None
+            else:
+                raise ValueError("Unknown status-check kind")
+            if identity in seen_nodes or not isinstance(context, str) or not context:
+                raise ValueError("Invalid or duplicate status-check identity")
+            seen_nodes.add(identity)
+            if is_required:
+                required.add((context, app_id))
+        page_info = contexts["pageInfo"]
+        has_next = page_info["hasNextPage"]
+        if not isinstance(has_next, bool):
+            raise TypeError("Invalid status-check pagination")
+        if not has_next:
+            break
+        cursor = page_info["endCursor"]
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise ValueError("Invalid status-check cursor")
+        seen_cursors.add(cursor)
+        after = cursor
+    if len(seen_nodes) != expected_total:
+        raise ValueError("Incomplete status-check pagination")
+    return required
+
+
 def collect_acceptance(contract: str, published_pr: str | None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
                "pr_url": published_pr, "checks": [],
@@ -51,7 +141,7 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
+        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){id headRefOid baseRefName state
             baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
                 json.dumps(owner), json.dumps(name), number)
         pr = _api("graphql", query=query)["data"]["repository"]["pullRequest"]
@@ -61,6 +151,7 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
+        required.update(_pr_required_checks(pr["id"], sha, branch, pr["state"]))
         rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100", paginate=True)
         for page in rules:
             for rule in page:
